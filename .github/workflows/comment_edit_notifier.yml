@@ -11,75 +11,52 @@ jobs:
       - name: Send Slack notification
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          EVENT_JSON: ${{ toJSON(github.event) }}
         run: |
-          # Determine if this is a PR or issue
-          if [ -n "${{ github.event.issue.pull_request.url }}" ]; then
+          # Use jq to safely extract fields and build the Slack payload
+          ITEM_NUMBER=$(echo "$EVENT_JSON" | jq -r '.issue.number')
+          ITEM_TITLE=$(echo "$EVENT_JSON" | jq -r '.issue.title')
+          EDITOR=$(echo "$EVENT_JSON" | jq -r '.sender.login')
+          COMMENT_URL=$(echo "$EVENT_JSON" | jq -r '.comment.html_url')
+          REPO="${{ github.repository }}"
+          IS_PR=$(echo "$EVENT_JSON" | jq -r '.issue.pull_request.url // empty')
+
+          if [ -n "$IS_PR" ]; then
             ITEM_TYPE="PR"
           else
             ITEM_TYPE="Issue"
           fi
 
-          ITEM_NUMBER="${{ github.event.issue.number }}"
-          ITEM_TITLE="${{ github.event.issue.title }}"
-          EDITOR="${{ github.event.sender.login }}"
-          COMMENT_URL="${{ github.event.comment.html_url }}"
-          REPO="${{ github.repository }}"
+          # Safely extract bodies, truncate to 500 chars
+          PREV_BODY=$(echo "$EVENT_JSON" | jq -r '.changes.body.from // "(empty)"' | head -c 500)
+          NEW_BODY=$(echo "$EVENT_JSON" | jq -r '.comment.body // "(empty)"' | head -c 500)
 
-          # Get the previous body (GitHub provides it in the event payload)
-          PREV_BODY=$(echo '${{ toJSON(github.event.changes.body.from) }}' | head -c 500)
-          NEW_BODY=$(echo '${{ toJSON(github.event.comment.body) }}' | head -c 500)
-
-          # Build Slack payload
-          cat <<PAYLOAD > /tmp/slack_payload.json
-          {
-            "blocks": [
-              {
-                "type": "header",
-                "text": {
-                  "type": "plain_text",
-                  "text": "Comment Edited on ${ITEM_TYPE} #${ITEM_NUMBER}"
-                }
-              },
-              {
-                "type": "section",
-                "fields": [
-                  { "type": "mrkdwn", "text": "*Repo:*\n${REPO}" },
-                  { "type": "mrkdwn", "text": "*Edited by:*\n${EDITOR}" }
-                ]
-              },
-              {
-                "type": "section",
-                "fields": [
-                  { "type": "mrkdwn", "text": "*${ITEM_TYPE}:*\n#${ITEM_NUMBER} — ${ITEM_TITLE}" }
-                ]
-              },
-              {
-                "type": "section",
-                "text": {
-                  "type": "mrkdwn",
-                  "text": "*Before:*\n\`\`\`${PREV_BODY}\`\`\`"
-                }
-              },
-              {
-                "type": "section",
-                "text": {
-                  "type": "mrkdwn",
-                  "text": "*After:*\n\`\`\`${NEW_BODY}\`\`\`"
-                }
-              },
-              {
-                "type": "actions",
-                "elements": [
-                  {
-                    "type": "button",
-                    "text": { "type": "plain_text", "text": "View Comment" },
-                    "url": "${COMMENT_URL}"
-                  }
-                ]
-              }
-            ]
-          }
-          PAYLOAD
+          # Build payload with jq to handle all escaping properly
+          jq -n \
+            --arg header "Comment Edited on $ITEM_TYPE #$ITEM_NUMBER" \
+            --arg repo "$REPO" \
+            --arg editor "$EDITOR" \
+            --arg item "$ITEM_TYPE #$ITEM_NUMBER — $ITEM_TITLE" \
+            --arg prev "*Before:*\n\`\`\`$PREV_BODY\`\`\`" \
+            --arg new "*After:*\n\`\`\`$NEW_BODY\`\`\`" \
+            --arg url "$COMMENT_URL" \
+            '{
+              blocks: [
+                { type: "header", text: { type: "plain_text", text: $header } },
+                { type: "section", fields: [
+                    { type: "mrkdwn", text: ("*Repo:*\n" + $repo) },
+                    { type: "mrkdwn", text: ("*Edited by:*\n" + $editor) }
+                ]},
+                { type: "section", fields: [
+                    { type: "mrkdwn", text: $item }
+                ]},
+                { type: "section", text: { type: "mrkdwn", text: $prev } },
+                { type: "section", text: { type: "mrkdwn", text: $new } },
+                { type: "actions", elements: [
+                    { type: "button", text: { type: "plain_text", text: "View Comment" }, url: $url }
+                ]}
+              ]
+            }' > /tmp/slack_payload.json
 
           curl -s -X POST -H 'Content-type: application/json' \
             --data @/tmp/slack_payload.json \
