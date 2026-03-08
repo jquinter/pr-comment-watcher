@@ -1,0 +1,86 @@
+name: Notify on Comment Edit
+
+on:
+  issue_comment:
+    types: [edited]
+
+jobs:
+  notify-slack:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send Slack notification
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          # Determine if this is a PR or issue
+          if [ -n "${{ github.event.issue.pull_request.url }}" ]; then
+            ITEM_TYPE="PR"
+          else
+            ITEM_TYPE="Issue"
+          fi
+
+          ITEM_NUMBER="${{ github.event.issue.number }}"
+          ITEM_TITLE="${{ github.event.issue.title }}"
+          EDITOR="${{ github.event.sender.login }}"
+          COMMENT_URL="${{ github.event.comment.html_url }}"
+          REPO="${{ github.repository }}"
+
+          # Get the previous body (GitHub provides it in the event payload)
+          PREV_BODY=$(echo '${{ toJSON(github.event.changes.body.from) }}' | head -c 500)
+          NEW_BODY=$(echo '${{ toJSON(github.event.comment.body) }}' | head -c 500)
+
+          # Build Slack payload
+          cat <<PAYLOAD > /tmp/slack_payload.json
+          {
+            "blocks": [
+              {
+                "type": "header",
+                "text": {
+                  "type": "plain_text",
+                  "text": "Comment Edited on ${ITEM_TYPE} #${ITEM_NUMBER}"
+                }
+              },
+              {
+                "type": "section",
+                "fields": [
+                  { "type": "mrkdwn", "text": "*Repo:*\n${REPO}" },
+                  { "type": "mrkdwn", "text": "*Edited by:*\n${EDITOR}" }
+                ]
+              },
+              {
+                "type": "section",
+                "fields": [
+                  { "type": "mrkdwn", "text": "*${ITEM_TYPE}:*\n#${ITEM_NUMBER} — ${ITEM_TITLE}" }
+                ]
+              },
+              {
+                "type": "section",
+                "text": {
+                  "type": "mrkdwn",
+                  "text": "*Before:*\n\`\`\`${PREV_BODY}\`\`\`"
+                }
+              },
+              {
+                "type": "section",
+                "text": {
+                  "type": "mrkdwn",
+                  "text": "*After:*\n\`\`\`${NEW_BODY}\`\`\`"
+                }
+              },
+              {
+                "type": "actions",
+                "elements": [
+                  {
+                    "type": "button",
+                    "text": { "type": "plain_text", "text": "View Comment" },
+                    "url": "${COMMENT_URL}"
+                  }
+                ]
+              }
+            ]
+          }
+          PAYLOAD
+
+          curl -s -X POST -H 'Content-type: application/json' \
+            --data @/tmp/slack_payload.json \
+            "$SLACK_WEBHOOK_URL"
